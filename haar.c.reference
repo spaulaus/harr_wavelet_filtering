@@ -1,0 +1,310 @@
+/* Haar Wavelet Transform
+ * Copyright (c) 2003 Emil Mikulic.
+ * http://dmr.ath.cx/
+ *
+ * Feel free to do whatever you like with this code.
+ * Feel free to credit me.
+ *
+ * $Id: haar.c,v 1.6 2004/10/09 09:27:08 emikulic Exp $
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+
+#include "targa.h" /* look at the URL given above */
+
+#define SIZE 256
+/* image must be square, size must be power of two */
+
+typedef double val;
+typedef uint8_t byte;
+
+
+
+void *xmalloc(size_t amount)
+{
+	void *ptr = malloc(amount);
+	if (!ptr)
+	{
+		printf("Ran out of memory in xmalloc()\n");
+		exit(EXIT_FAILURE);
+	}
+	return ptr;
+}
+
+
+
+void do_haar(val array[SIZE])
+{
+	val avg[SIZE], diff[SIZE];
+	int i, count;
+
+	for (count=SIZE; count>1; count/=2)
+	{
+		for (i=0; i<count/2; i++)
+		{
+			avg[i] = (array[2*i] + array[2*i + 1]) / 2;
+			diff[i] = array[2*i] - avg[i];
+		}
+
+		for (i=0; i<count/2; i++)
+		{
+			array[i] = avg[i];
+			array[i + count/2] = diff[i];
+		}
+	}
+}
+
+
+
+#define DONTFAIL(x) do { tga_result res;  if ((res=x) != TGA_NOERR) { \
+	printf("Targa error: %s\n", tga_error(res)); \
+	exit(EXIT_FAILURE); } } while(0)
+
+void load_targa(val dest[SIZE][SIZE], const char *fn)
+{
+	tga_image tga;
+	int i,j;
+	byte *ptr;
+
+	DONTFAIL( tga_read(&tga, fn) );
+
+	printf("Loaded %dx%dx%dbpp targa.\n",
+		tga.width, tga.height, tga.pixel_depth);
+
+	if (tga.width != SIZE || tga.height != SIZE)
+	{
+		printf("Targa is wrong size! (expecting %dx%d)\n",
+			SIZE, SIZE);
+		exit(EXIT_FAILURE);
+	}
+
+	if (!tga_is_mono(&tga)) DONTFAIL( tga_desaturate_rec_601_1(&tga) );
+	if (!tga_is_top_to_bottom(&tga)) DONTFAIL( tga_flip_vert(&tga) );
+	if (tga_is_right_to_left(&tga)) DONTFAIL( tga_flip_horiz(&tga) );
+
+	ptr = tga.image_data;
+
+	/* convert to val dest[][] */
+	for (j=0; j<SIZE; j++)
+	for (i=0; i<SIZE; i++)
+		dest[j][i] = (val)(*ptr++) / 255.0;
+
+	tga_free_buffers(&tga);
+}
+
+
+
+void transform_row(val data[SIZE][SIZE], int row)
+{
+	do_haar(data[row]);
+	printf("haar row %5d\r", row);
+}
+
+
+
+void transform_col(val data[SIZE][SIZE], int col)
+{
+	val coldata[SIZE];
+	int i;
+
+	for (i=0; i<SIZE; i++) coldata[i] = data[i][col];
+
+	do_haar(coldata);
+
+	for (i=0; i<SIZE; i++) data[i][col] = coldata[i];
+	printf("haar column %5d\r", col);
+}
+
+
+
+void write_haar_img(val data[SIZE][SIZE], const char *fn)
+{
+	byte img[SIZE][SIZE][3];
+	val max_neg, max_pos;
+	int i,j;
+
+	/* find maximums */
+	max_neg = max_pos = 0.0;
+
+	for (j=0; j<SIZE; j++)
+	for (i=0; i<SIZE; i++)
+	{
+		if (data[j][i] < max_neg) max_neg = data[j][i];
+		if (data[j][i] > max_pos) max_pos = data[j][i];
+	}
+
+	/* data[][] -> img[][][] */
+	for (j=0; j<SIZE; j++)
+	for (i=0; i<SIZE; i++)
+	{
+		byte b;
+		val v;
+
+		if (data[j][i] < 0)
+			v = data[j][i] / max_neg;
+		else
+			v = data[j][i] / max_pos;
+
+		v = sqrt(v);
+		b = 255 - (byte)(v * 255.0);
+
+		if (data[j][i] < 0)
+		{
+			img[j][i][0] = 255;
+			img[j][i][1] = b;
+			img[j][i][2] = b;
+		}
+		else
+		{
+			img[j][i][0] = b;
+			img[j][i][1] = b;
+			img[j][i][2] = 255;
+		}
+	}
+
+	DONTFAIL( tga_write_rgb(fn, (uint8_t*)img, SIZE, SIZE, 24) );
+}
+
+
+
+void write_gray_img(val data[SIZE][SIZE], const char *fn)
+{
+	byte image[SIZE][SIZE];
+	int i,j;
+
+	for (j=0; j<SIZE; j++)
+	for (i=0; i<SIZE; i++)
+		image[j][i] =
+			(data[j][i] < 0.0) ? 0 :
+			(data[j][i] > 1.0) ? 255 :
+			(byte)(data[j][i] * 255.0);
+
+	DONTFAIL( tga_write_mono(fn, (uint8_t*)image, SIZE, SIZE) );
+}
+
+
+
+void undo_haar(val array[SIZE])
+{
+	val tmp[SIZE];
+	int i, count;
+
+	for (count=2; count<=SIZE; count*=2)
+	{
+		for (i=0; i<count/2; i++)
+		{
+			tmp[2*i]     = array[i] + array[i + count/2];
+			tmp[2*i + 1] = array[i] - array[i + count/2];
+		}
+
+		for (i=0; i<count; i++) array[i] = tmp[i];
+	}
+}
+
+
+
+void untransform_row(val data[SIZE][SIZE], int row)
+{
+	undo_haar(data[row]);
+	printf("unhaar row %5d\r", row);
+}
+
+
+
+void untransform_col(val data[SIZE][SIZE], int col)
+{
+	val coldata[SIZE];
+	int i;
+
+	for (i=0; i<SIZE; i++) coldata[i] = data[i][col];
+
+	undo_haar(coldata);
+
+	for (i=0; i<SIZE; i++) data[i][col] = coldata[i];
+	printf("unhaar column %5d\r", col);
+}
+
+
+
+/* returns the percentage of coefficients under <amount> */
+val percent_under(val data[SIZE][SIZE], val amount)
+{
+	int num_thrown = 0, x,y;
+
+	for (y=0; y<SIZE; y++)
+	for (x=0; x<SIZE; x++)
+		if (fabs(data[y][x]) <= amount)
+			num_thrown++;
+
+	return (val)(100*num_thrown) / (val)(SIZE*SIZE);
+}
+
+
+
+/* throw away weakest <percentage>% of coefficients */
+#define MAX_ITER 250
+void throw_away(val data[SIZE][SIZE], val percentage)
+{
+	val low, high, thresh, loss;
+	int i,j;
+
+	/* find max */
+	low = high = 0.0;
+	for (j=0; j<SIZE; j++)
+	for (i=0; i<SIZE; i++)
+		if (fabs(data[j][i]) > high) high = fabs(data[j][i]);
+
+	/* binary search */
+	for (i=0; i<MAX_ITER; i++)
+	{
+		thresh = (low+high)/2.0;
+		loss = percent_under(data, thresh);
+
+		printf("binary search: "
+			"iteration=%4d, thresh=%4f, loss=%3.2f%%\r",
+			i+1, thresh, loss);
+		fflush(stdout);
+
+		if (loss < percentage)
+			low = thresh;
+		else
+			high = thresh;
+
+		if (fabs(loss - percentage) < 0.01) i = MAX_ITER;
+		if (fabs(low - high) < 0.0000001) i = MAX_ITER;
+	}
+
+	/* zero out anything too low */
+	for (j=0; j<SIZE; j++)
+	for (i=0; i<SIZE; i++)
+		if (fabs(data[j][i]) < thresh) data[j][i] = 0.0;
+
+}
+
+
+
+int main()
+{
+	val image[SIZE][SIZE];
+	int i;
+
+	load_targa(image, "test.tga");
+
+	for (i=0; i<SIZE; i++) transform_row(image, i); printf("\n");
+	for (i=0; i<SIZE; i++) transform_col(image, i); printf("\n");
+
+	write_haar_img(image, "output-coeff-full.tga");
+
+	throw_away(image, 90); printf("\n");
+
+	write_haar_img(image, "output-coeff-part.tga");
+
+	for (i=0; i<SIZE; i++) untransform_col(image, i); printf("\n");
+	for (i=0; i<SIZE; i++) untransform_row(image, i); printf("\n");
+
+	write_gray_img(image, "output-unhaar.tga");
+
+	return 0;
+}
